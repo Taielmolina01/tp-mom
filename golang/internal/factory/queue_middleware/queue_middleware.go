@@ -13,6 +13,7 @@ type queueMiddleware struct {
 	channel       *amqp.Channel
 	connection    *amqp.Connection
 	stopConsuming chan struct{}
+	returnChan    chan amqp.Return
 }
 
 const (
@@ -25,14 +26,21 @@ func CreateQueueMiddlewareHelper(
 ) (m.Middleware, error) {
 	conn, err := amqp.Dial(fmt.Sprintf(_URL_SIGN, connectionSettings.Hostname, connectionSettings.Port))
 	if err != nil {
-		return nil, err
+		return nil, m.ErrMessageMiddlewareDisconnected
+	}
+
+	middleware := queueMiddleware{
+		connection:    conn,
+		stopConsuming: nil,
 	}
 
 	ch, err := conn.Channel()
 	if err != nil {
-		conn.Close()
-		return nil, err
+		middleware.Close()
+		return nil, m.ErrMessageMiddlewareDisconnected
 	}
+
+	middleware.channel = ch
 
 	q, err := ch.QueueDeclare(
 		queueName, // name
@@ -45,10 +53,11 @@ func CreateQueueMiddlewareHelper(
 		},
 	)
 	if err != nil {
-		ch.Close()
-		conn.Close()
-		return nil, err
+		middleware.Close()
+		return nil, m.ErrMessageMiddlewareDisconnected
 	}
+
+	middleware.queue = q
 
 	returned := ch.NotifyReturn(make(chan amqp.Return, 10))
 
@@ -62,12 +71,9 @@ func CreateQueueMiddlewareHelper(
 		}
 	}()
 
-	return &queueMiddleware{
-		queue:         q,
-		channel:       ch,
-		connection:    conn,
-		stopConsuming: nil,
-	}, nil
+	middleware.returnChan = returned
+
+	return &middleware, nil
 }
 
 func (q *queueMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack func(), nack func())) (err error) {

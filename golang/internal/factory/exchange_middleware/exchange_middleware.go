@@ -29,14 +29,23 @@ func CreateExchangeMiddlewareHelper(
 ) (m.Middleware, error) {
 	conn, err := amqp.Dial(fmt.Sprintf(_URL_SIGN, connectionSettings.Hostname, connectionSettings.Port))
 	if err != nil {
-		return nil, err
+		return nil, m.ErrMessageMiddlewareDisconnected
+	}
+
+	middleware := &exchangeMiddleware{
+		exchange:      exchange,
+		publishKeys:   keys,
+		connection:    conn,
+		stopConsuming: nil,
 	}
 
 	ch, err := conn.Channel()
 	if err != nil {
-		conn.Close()
-		return nil, err
+		middleware.Close()
+		return nil, m.ErrMessageMiddlewareDisconnected
 	}
+
+	middleware.channel = ch
 
 	err = ch.ExchangeDeclare(
 		exchange,            // name
@@ -47,10 +56,10 @@ func CreateExchangeMiddlewareHelper(
 		false,               // no-wait
 		nil,                 // arguments
 	)
+
 	if err != nil {
-		ch.Close()
-		conn.Close()
-		return nil, err
+		middleware.Close()
+		return nil, m.ErrMessageMiddlewareDisconnected
 	}
 	q, err := ch.QueueDeclare(
 		"",    // name
@@ -60,10 +69,11 @@ func CreateExchangeMiddlewareHelper(
 		false, // no-wait
 		nil,   // arguments
 	)
+	middleware.queue = q
+
 	if err != nil {
-		ch.Close()
-		conn.Close()
-		return nil, err
+		middleware.Close()
+		return nil, m.ErrMessageMiddlewareDisconnected
 	}
 
 	for _, key := range keys {
@@ -75,9 +85,8 @@ func CreateExchangeMiddlewareHelper(
 			nil,
 		)
 		if err != nil {
-			ch.Close()
-			conn.Close()
-			return nil, m.ErrMessageMiddlewareMessage
+			middleware.Close()
+			return nil, m.ErrMessageMiddlewareDisconnected
 		}
 	}
 
@@ -93,15 +102,9 @@ func CreateExchangeMiddlewareHelper(
 		}
 	}()
 
-	return &exchangeMiddleware{
-		queue:         q,
-		exchange:      exchange,
-		publishKeys:   keys,
-		channel:       ch,
-		connection:    conn,
-		stopConsuming: nil,
-		returnChan:    returned,
-	}, nil
+	middleware.returnChan = returned
+
+	return middleware, nil
 }
 
 func (e *exchangeMiddleware) StartConsuming(callbackFunc func(msg m.Message, ack func(), nack func())) (err error) {
